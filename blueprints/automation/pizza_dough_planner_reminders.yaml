@@ -1,0 +1,192 @@
+blueprint:
+  name: Pizza-Teigplaner – Erinnerungen
+  description: >
+    Erinnert an jeden Schritt des Pizza-Teigplans aus der Karte
+    „custom:pizza-dough-planner-card“: Vorwarnung, Kneten, Stretch & Fold,
+    Ballen formen, aus dem Kühlschrank, Ofen anheizen und Essenszeit.
+    Die Erinnerungen laufen nur, solange in der Karte „Erinnerungen an“ aktiv ist.
+    Zur Essenszeit schaltet sich der Plan automatisch ab.
+
+
+    In der Benachrichtigungs-Aktion stehen die Variablen **title** und **message**
+    zur Verfügung, z. B. `{{ title }}` und `{{ message }}`.
+  domain: automation
+  author: florian-ha86
+  source_url: https://github.com/florian-ha86/pizza-dough-planner-card/blob/main/blueprints/automation/pizza_dough_planner_reminders.yaml
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    planner:
+      name: Teigplaner
+      icon: mdi:pizza
+      input:
+        storage_entity:
+          name: Speicher-Helfer
+          description: Derselbe Text-Helfer, der in der Karte als „Speicher-Helfer“ ausgewählt ist.
+          selector:
+            entity:
+              filter:
+                - domain: input_text
+        notify_actions:
+          name: Benachrichtigung
+          description: >
+            Aktion(en) zum Versenden der Erinnerung, z. B. „Benachrichtigung senden“
+            an dein Handy. Verwende {{ title }} und {{ message }} als Titel und Text.
+          selector:
+            action: {}
+    optional:
+      name: Optionale Daten
+      icon: mdi:tune
+      collapsed: true
+      input:
+        temperature_entity:
+          name: Raumtemperatur-Sensor
+          description: Derselbe Sensor wie in der Karte, damit die Hefemenge in der Nachricht übereinstimmt. Leer lassen, wenn in der Karte kein Sensor gewählt ist.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: temperature
+        weather_entity:
+          name: Wetter-Integration
+          description: Für Außentemperatur und Wind in der Ofen-Erinnerung.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: weather
+        advance_minutes:
+          name: Vorwarnung vor dem Kneten
+          description: 0 = keine Vorwarnung.
+          default: 15
+          selector:
+            number:
+              min: 0
+              max: 120
+              step: 5
+              unit_of_measurement: min
+              mode: slider
+        oven_name:
+          name: Name des Ofens
+          default: Pizzaofen
+          selector:
+            text: {}
+
+mode: queued
+max_exceeded: silent
+
+triggers:
+  - trigger: time_pattern
+    minutes: "/1"
+
+variables:
+  storage: !input storage_entity
+  temp_entity: !input temperature_entity
+  weather: !input weather_entity
+  advance: !input advance_minutes
+  oven: !input oven_name
+  d: >
+    {% set raw = states(storage) %}
+    {% if raw is string and raw.startswith('{') %}{{ raw | from_json }}{% else %}{{ {} }}{% endif %}
+  due: >
+    {% set ns = namespace(items=[]) %}
+    {% if d.get('a', 0) | int(0) == 1 and d.get('e') %}
+      {% set e = d.e | float(0) %}
+      {% set sg = d.get('sg', 0) | float(0) %}{% set sf = d.get('sf', 0) | float(0) %}
+      {% set kg = d.get('kg', 0) | float(0) %}{% set st = d.get('st', 0) | float(0) %}
+      {% set o = d.get('o', 20) | float(0) %}
+      {% set kn = e - (st + kg + sg) * 3600 %}
+      {% set nowm = (as_timestamp(now()) // 60) | int %}
+      {% set steps = [
+        ['vorab', kn - advance * 60 if advance | int(0) > 0 else none],
+        ['kneten', kn],
+        ['sf', kn + sf * 3600 if (sf > 0 and sf < sg) else none],
+        ['kuehl', e - (st + kg) * 3600 if kg > 0 else none],
+        ['formen', e - st * 3600],
+        ['ofen', e - o * 60],
+        ['essen', e]
+      ] %}
+      {% for key, t in steps %}
+        {% if t is not none and (t // 60) | int == nowm %}{% set ns.items = ns.items + [key] %}{% endif %}
+      {% endfor %}
+    {% endif %}
+    {{ ns.items }}
+
+conditions:
+  - condition: template
+    value_template: "{{ due | count > 0 }}"
+
+actions:
+  - variables:
+      # Gleiche Rechnung wie in der Karte (calc)
+      zutaten: >
+        {% set n = d.get('n', 4) | float(0) %}{% set g = d.get('g', 260) | float(0) %}
+        {% set h = d.get('h', 65) | float(0) / 100 %}{% set s = d.get('s', 2.8) | float(0) / 100 %}
+        {% set y = d.get('y', 'F') %}{% set tot = n * g %}
+        {% set flourname = d.get('m') or 'Mehl' %}
+        {% set rt = d.get('rt', 21) | float(21) %}
+        {% set T = states(temp_entity) | float(rt) if temp_entity else rt %}
+        {% if y == 'L' %}
+          {% set F = tot / (1 + h + s) %}{% set p = d.get('la', 15) | float(0) / 100 %}{% set lh = d.get('lh', 50) | float(0) / 100 %}
+          {% set yeast = F * p %}{% set lmf = yeast / (1 + lh) %}{% set lmw = yeast - lmf %}
+          {% set flour = F - lmf %}{% set water = [F * h - lmw, 0] | max %}{% set salt = F * s %}
+          {% set ylabel = 'Lievito Madre' %}{% set ytxt = yeast | round(0) | int ~ ' g' %}
+        {% else %}
+          {% set kt = d.get('kt', 7) | float(7) %}
+          {% set eff = (d.get('sg', 0) | float(0) + d.get('st', 0) | float(0)) * 2 ** ((T - 21) / 6) + d.get('kg', 0) | float(0) * 2 ** ((kt - 21) / 6) %}
+          {% set p = 4.0 / ([eff, 0.5] | max) ** 1.25 * d.get('k', 100) | float(100) / 100 %}
+          {% set p = [[p, 0.02] | max, 3.5] | min %}{% set p = p / 3 if y == 'T' else p %}
+          {% set flour = tot / (1 + h + s + p / 100) %}{% set water = flour * h %}{% set salt = flour * s %}
+          {% set ylabel = 'Trockenhefe' if y == 'T' else 'Frischhefe' %}{% set ytxt = (flour * p / 100) | round(2) ~ ' g' %}
+        {% endif %}
+        {% set em = d.get('em', 'O') %}
+        {% set tw = 3 * d.get('tz', 23) | float(23) - T - T - d.get('tr', 12) | float(12) %}
+        {% set tl = d.get('tl', 12) | float(12) %}
+        {% if em == 'F' %}{% set fi = d.get('ea', 0) | float(0) / 100 %}
+        {% elif em == 'A' %}{% set fi = 0 if tw >= tl else [0.6, (tl - tw) / (tl + 80)] | min %}
+        {% else %}{% set fi = 0 %}{% endif %}
+        {% set ice = [(water * fi) | round(0), water] | min %}
+        {% set wlines = ['💧 Wasser (eiskalt): ' ~ ((water - ice) | round(0) | int) ~ ' g', '🧊 Eiswürfel: ' ~ (ice | int) ~ ' g'] if ice > 0 else ['💧 Wasser: ' ~ (water | round(0) | int) ~ ' g'] %}
+        {{ (['🌾 ' ~ flourname ~ ': ' ~ (flour | round(0) | int) ~ ' g'] + wlines + [
+            '🧂 Salz: ' ~ (salt | round(1)) ~ ' g',
+            '🟫 ' ~ ylabel ~ ': ' ~ ytxt]) | join('\n') }}
+      wetter: >
+        {% if weather and states(weather) not in ['unknown', 'unavailable'] %}
+          Draußen {{ state_attr(weather, 'temperature') }} {{ state_attr(weather, 'temperature_unit') or '°C' }}, Wind {{ state_attr(weather, 'wind_speed') | float(0) | round(0) | int }} {{ state_attr(weather, 'wind_speed_unit') or 'km/h' }}.
+        {% endif %}
+  - repeat:
+      for_each: "{{ due }}"
+      sequence:
+        - variables:
+            step: "{{ repeat.item }}"
+            title: >
+              {{ {
+                'vorab': '🍕 Pizzateig in ' ~ advance ~ ' Minuten',
+                'kneten': '🍕 Jetzt Teig kneten',
+                'sf': '↔️ Stretch & Fold',
+                'kuehl': '⚪ Ballen formen & ab in den Kühlschrank',
+                'formen': ('🧊 Teiglinge aus dem Kühlschrank' if d.get('kg', 0) | float(0) > 0 else '⚪ Ballen formen'),
+                'ofen': '🔥 ' ~ oven ~ ' anheizen',
+                'essen': '🍕 Pizzazeit!'
+              }[step] }}
+            message: >
+              {% set n = d.get('n', 4) | int(0) %}{% set g = d.get('g', 260) | int(0) %}
+              {% set name = d.get('r') or 'Pizzateig' %}
+              {% if step == 'vorab' %}{{ "Gleich geht's los (" ~ name ~ ', ' ~ n ~ ' × ' ~ g ~ ' g). Zutaten bereitstellen:\n' ~ zutaten }}
+              {% elif step == 'kneten' %}{{ name ~ ' – ' ~ n ~ ' Teiglinge à ' ~ g ~ ' g\n' ~ zutaten ~ '\n\nZu einem glatten Teig kneten' ~ (' (Eiswürfel gleich am Anfang mit dem Wasser dazugeben)' if '🧊' in zutaten else '') ~ ' und abgedeckt ruhen lassen.' }}
+              {% elif step == 'sf' %}Teig dehnen und falten, wieder abdecken. In {{ ((d.get('sg', 0) | float(0) - d.get('sf', 0) | float(0)) * 60) | round(0) | int }} Minuten werden die Ballen geformt.
+              {% elif step == 'kuehl' %}{{ n }} Ballen à {{ g }} g abstechen, rund schleifen und abgedeckt für {{ d.get('kg', 0) | int(0) }} h in den Kühlschrank.
+              {% elif step == 'formen' %}{% if d.get('kg', 0) | float(0) > 0 %}Teiglinge rausnehmen und {{ d.get('st', 0) }} h abgedeckt bei Raumtemperatur akklimatisieren lassen.{% else %}{{ n }} Ballen à {{ g }} g formen und {{ d.get('st', 0) }} h abgedeckt gehen lassen.{% endif %}
+              {% elif step == 'ofen' %}{{ 'In ' ~ (d.get('o', 20) | int(0)) ~ " Minuten gibt's Pizza – Belag vorbereiten!" ~ ('\n' ~ wetter if wetter | trim else '') }}
+              {% else %}Guten Appetit! Der Teigplan ist abgeschlossen.{% endif %}
+        - sequence: !input notify_actions
+        - if:
+            - condition: template
+              value_template: "{{ step == 'essen' }}"
+          then:
+            - action: input_text.set_value
+              target:
+                entity_id: "{{ storage }}"
+              data:
+                value: "{{ dict(d, a=0) | to_json }}"

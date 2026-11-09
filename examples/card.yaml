@@ -1,0 +1,7 @@
+# Example card configuration (panel view recommended)
+type: custom:pizza-dough-planner-card
+entity: input_text.pizza_teigplaner        # required – text helper, max length 255
+temperature_entity: sensor.kitchen_temperature   # optional
+weather_entity: weather.home                # optional
+title: Nächster Pizzaabend                  # optional
+oven_name: Pizzaofen                        # optional
